@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Combat DND</title>
+<style>
+  body { font-family: Arial; margin: 0; display: flex; height: 100vh; background: #f0f0f0; }
+  #controls { width: 320px; padding: 10px; background: #fff; border-right: 2px solid #ccc; overflow-y: auto; }
+  #canvasContainer { flex-grow: 1; position: relative; background: #fff; overflow: hidden; }
+  #battlefield { position: absolute; left: 0; top: 0; cursor: crosshair; }
+  .control-section { margin-bottom: 15px; border: 1px solid #ddd; padding: 10px; border-radius: 8px; }
+  h2 { font-size: 18px; margin-top: 0; }
+  label { display: block; margin-top: 6px; }
+  input[type="number"], input[type="text"], input[type="file"], textarea { width: 100%; }
+  button { margin-top: 5px; width: 100%; padding: 6px; }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <h1>⚔️ Combat DND</h1>
+
+  <div class="control-section">
+    <h2>Fond & Grille</h2>
+    <label>Charger une image de fond :</label>
+    <input type="file" id="bgImage" accept="image/*" />
+    <label><input type="checkbox" id="showGrid" checked> Afficher la grille métrique</label>
+  </div>
+
+  <div class="control-section">
+    <h2>Créer un point</h2>
+    <label>Nom :</label><input type="text" id="pointName" placeholder="Nom du point" />
+    <label>Couleur :</label><input type="color" id="pointColor" value="#ff0000" />
+    <label>Taille (m) :</label><input type="number" id="pointSize" value="0.5" step="0.1" />
+    <label>Distance max (m) :</label><input type="number" id="maxMove" value="9" step="0.1" />
+    <button id="addPoint">Ajouter point</button>
+  </div>
+
+  <div class="control-section">
+    <h2>Gestion des tours</h2>
+    <textarea id="turnOrder" rows="4" placeholder="Entrer les noms des points, un par ligne"></textarea>
+    <button id="startTurns">Démarrer les tours</button>
+    <p>Tour actuel : <span id="currentTurn">-</span></p>
+    <button id="nextTurn">Tour suivant</button>
+    <button id="toggleMoveLimit">Désactiver limite (1 tour)</button>
+    <button id="beginCombat">Commencer le combat</button>
+  </div>
+
+  <div class="control-section">
+    <h2>Légende & propriétés</h2>
+    <div id="pointsLegend"></div>
+  </div>
+</div>
+
+<div id="canvasContainer">
+  <canvas id="battlefield"></canvas>
+</div>
+
+<script>
+const canvas = document.getElementById('battlefield');
+const ctx = canvas.getContext('2d');
+const bgInput = document.getElementById('bgImage');
+const showGrid = document.getElementById('showGrid');
+const addBtn = document.getElementById('addPoint');
+const nextTurnBtn = document.getElementById('nextTurn');
+const startTurnsBtn = document.getElementById('startTurns');
+const toggleMoveLimitBtn = document.getElementById('toggleMoveLimit');
+const beginCombatBtn = document.getElementById('beginCombat');
+const currentTurnDisplay = document.getElementById('currentTurn');
+const pointsLegendDiv = document.getElementById('pointsLegend');
+
+let points = [];
+let selectedPoint = null;
+let dragging = false;
+let bgImage = null;
+let turns = [];
+let currentTurnIndex = -1;
+let combatStarted = false;
+let moveLimitDisabled = false;
+
+const pixelsPerMeter = 100;
+let lastX, lastY;
+
+function resizeCanvas() {
+  canvas.width = window.innerWidth - 320;
+  canvas.height = window.innerHeight;
+  draw();
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+bgInput.addEventListener('change', e => {
+  const file = e.target.files[0];
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const img = new Image();
+    img.onload = () => { bgImage = img; draw(); };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+});
+
+canvas.addEventListener('mousedown', e => {
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left);
+  const y = (e.clientY - rect.top);
+  selectedPoint = null;
+  for (let p of points) {
+    const dist = Math.hypot(x - p.x, y - p.y);
+    if (dist < p.size / 2) {
+      selectedPoint = p;
+      lastX = x; lastY = y;
+      dragging = true;
+      break;
+    }
+  }
+  draw();
+});
+
+canvas.addEventListener('mouseup', () => { dragging = false; });
+
+canvas.addEventListener('mousemove', e => {
+  if (dragging && selectedPoint) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left);
+    const y = (e.clientY - rect.top);
+    const dx = (x - lastX) / pixelsPerMeter;
+    const dy = (y - lastY) / pixelsPerMeter;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    const newDistance = selectedPoint.moved + dist;
+    if (combatStarted && !moveLimitDisabled && newDistance > selectedPoint.maxMove) return;
+    selectedPoint.x += (x - lastX);
+    selectedPoint.y += (y - lastY);
+    if (combatStarted) selectedPoint.moved = newDistance;
+    lastX = x; lastY = y;
+    draw();
+    updateLegend();
+  }
+});
+
+addBtn.addEventListener('click', () => {
+  const name = document.getElementById('pointName').value.trim();
+  if (!name) return;
+  const color = document.getElementById('pointColor').value;
+  const size = parseFloat(document.getElementById('pointSize').value) * pixelsPerMeter;
+  const maxMove = parseFloat(document.getElementById('maxMove').value);
+  points.push({ name, color, size, x: canvas.width/2, y: canvas.height/2, maxMove, moved:0 });
+  updateLegend();
+  draw();
+});
+
+function updateLegend() {
+  pointsLegendDiv.innerHTML = '';
+  points.forEach((p,i) => {
+    const div = document.createElement('div');
+    div.style.border = '1px solid #ccc';
+    div.style.marginBottom = '4px';
+    div.style.padding = '4px';
+    div.innerHTML = `
+      <input type="text" value="${p.name}" data-index="${i}" class="editName">
+      <input type="number" value="${(p.size/pixelsPerMeter).toFixed(2)}" step="0.1" data-index="${i}" class="editSize">
+      <input type="number" value="${p.maxMove}" step="0.1" data-index="${i}" class="editMove">
+      <input type="color" value="${p.color}" data-index="${i}" class="editColor">
+    `;
+    pointsLegendDiv.appendChild(div);
+  });
+
+  document.querySelectorAll('.editName').forEach(inp => {
+    inp.addEventListener('input', e => { points[e.target.dataset.index].name = e.target.value; draw(); });
+  });
+  document.querySelectorAll('.editSize').forEach(inp => {
+    inp.addEventListener('input', e => {
+      points[e.target.dataset.index].size = parseFloat(inp.value) * pixelsPerMeter;
+      draw();
+    });
+  });
+  document.querySelectorAll('.editMove').forEach(inp => {
+    inp.addEventListener('input', e => { points[e.target.dataset.index].maxMove = parseFloat(inp.value); draw(); });
+  });
+  document.querySelectorAll('.editColor').forEach(inp => {
+    inp.addEventListener('input', e => { points[e.target.dataset.index].color = inp.value; draw(); });
+  });
+}
+
+startTurnsBtn.addEventListener('click', () => {
+  const order = document.getElementById('turnOrder').value.trim().split('\n').map(s=>s.trim()).filter(s=>s);
+  turns = order;
+  currentTurnIndex = 0;
+  points.forEach(p=>p.moved=0);
+  updateTurnDisplay();
+});
+
+nextTurnBtn.addEventListener('click', () => {
+  if (turns.length===0) return;
+  currentTurnIndex = (currentTurnIndex+1)%turns.length;
+  points.forEach(p=>p.moved=0);
+  moveLimitDisabled = false;
+  updateTurnDisplay();
+});
+
+toggleMoveLimitBtn.addEventListener('click', ()=>{ moveLimitDisabled=!moveLimitDisabled; });
+
+beginCombatBtn.addEventListener('click', ()=>{ combatStarted=true; draw(); });
+
+function updateTurnDisplay() {
+  currentTurnDisplay.textContent = turns[currentTurnIndex] || '-';
+  draw();
+}
+
+function drawGrid() {
+  const spacing = pixelsPerMeter;
+  ctx.strokeStyle='#ddd'; ctx.lineWidth=1;
+  for(let x=0;x<canvas.width;x+=spacing){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,canvas.height);ctx.stroke();}
+  for(let y=0;y<canvas.height;y+=spacing){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();}
+}
+
+function draw() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  if(bgImage) ctx.drawImage(bgImage,0,0,canvas.width,canvas.height);
+  if(showGrid.checked) drawGrid();
+  points.forEach(p=>{
+    const isTurn = turns[currentTurnIndex]===p.name;
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,p.size/2,0,2*Math.PI);
+    ctx.fillStyle=p.color;
+    ctx.globalAlpha=isTurn||!combatStarted?1:0.7;
+    ctx.fill();
+    ctx.globalAlpha=1;
+    ctx.strokeStyle=selectedPoint===p?'black':'gray';
+    ctx.lineWidth=selectedPoint===p?3:1;
+    ctx.stroke();
+    ctx.fillStyle='white';
+    ctx.font=`${p.size/2}px Arial`;
+    ctx.textAlign='center';
+    ctx.textBaseline='middle';
+    ctx.fillText(p.name[0].toUpperCase(),p.x,p.y);
+
+    if(selectedPoint===p && combatStarted) {
+      const remaining = moveLimitDisabled ? p.maxMove : Math.max(p.maxMove-p.moved,0);
+      const radius = remaining*pixelsPerMeter;
+      ctx.beginPath();
+      ctx.arc(p.x,p.y,radius,0,2*Math.PI);
+      ctx.strokeStyle='rgba(0,0,255,0.5)'; ctx.lineWidth=2; ctx.stroke();
+      ctx.fillStyle='blue';
+      ctx.font='14px Arial';
+      ctx.fillText(`${remaining.toFixed(1)}m`,p.x,p.y-radius-10);
+    }
+  });
+}
+</script>
+
+</body>
+</html>
